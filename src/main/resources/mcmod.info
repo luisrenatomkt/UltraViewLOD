@@ -1,0 +1,8 @@
+[{
+  "modid": "ultraviewlod",
+  "name": "UltraView LOD",
+  "description": "Renderizacao de terreno distante (LOD + texturas em cache) para PCs fracos. Jogadores continuam entidades reais e nunca aparecem atraves de paredes.",
+  "version": "${version}",
+  "mcversion": "${mcversion}",
+  "authorList": ["UltraView"]
+}]
