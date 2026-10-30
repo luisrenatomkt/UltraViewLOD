@@ -1,0 +1,28 @@
+name: Build UltraView LOD
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 8
+      - name: Instalar Gradle 2.14.1
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-2.14.1-bin.zip
+          unzip -q gradle-2.14.1-bin.zip -d $HOME/gradle
+          echo "$HOME/gradle/gradle-2.14.1/bin" >> $GITHUB_PATH
+      - name: Compilar (gera o JAR)
+        run: gradle setupCiWorkspace build -x test --no-daemon
+      - name: Testes unitarios (informativo)
+        continue-on-error: true
+        run: gradle test --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UltraViewLOD-jar
+          path: build/libs/*.jar
