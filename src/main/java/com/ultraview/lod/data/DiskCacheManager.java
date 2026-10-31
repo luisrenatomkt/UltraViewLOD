@@ -9,7 +9,7 @@ import java.util.zip.*;
 /** Cache em disco por mundo/dimensao, com CRC32, versao de formato e escrita atomica. */
 public final class DiskCacheManager {
     private static final int MAGIC = 0x55564C31;
-    public static final int FORMAT_VERSION = 1;
+    public static final int FORMAT_VERSION = 2; // v2: flags carregam a 'queda' copa->chao; caches v1 (alturas de copa) sao descartados
     private final File baseDir;
 
     public DiskCacheManager(File baseDir) { this.baseDir = baseDir; }

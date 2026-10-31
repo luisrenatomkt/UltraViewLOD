@@ -3,6 +3,7 @@ package com.ultraview.lod.render;
 import com.ultraview.lod.config.LODConfig;
 import com.ultraview.lod.core.DistantRepresentationCache;
 import com.ultraview.lod.core.LODManager;
+import com.ultraview.lod.core.LODProfiler;
 import com.ultraview.lod.core.LODTransitionManager;
 import com.ultraview.lod.data.Region;
 import com.ultraview.lod.mesh.MeshData;
@@ -70,7 +71,9 @@ public final class DistantTerrainRenderer {
         float rain = mc.theWorld.getRainStrength(pt);
         float b = Math.min(1.0f, 0.3f + 0.7f * sun * (1.0f - 0.3f * rain));
 
-        GL11.glPushAttrib(GL11.GL_ALL_ATTRIB_BITS);
+        // mascara estreita (GL_ALL_ATTRIB_BITS custa caro todo quadro) com tudo que este metodo altera
+        GL11.glPushAttrib(GL11.GL_ENABLE_BIT | GL11.GL_DEPTH_BUFFER_BIT | GL11.GL_FOG_BIT | GL11.GL_LIGHTING_BIT
+            | GL11.GL_COLOR_BUFFER_BIT | GL11.GL_POLYGON_BIT | GL11.GL_CURRENT_BIT | GL11.GL_TEXTURE_BIT);
         int prevTex = GL11.glGetInteger(GL11.GL_TEXTURE_BINDING_2D);
         OpenGlHelper.setActiveTexture(OpenGlHelper.lightmapTexUnit);
         boolean lmOn = GL11.glIsEnabled(GL11.GL_TEXTURE_2D);
@@ -90,6 +93,9 @@ public final class DistantTerrainRenderer {
         GL11.glDisable(GL11.GL_BLEND);
         GL11.glDisable(GL11.GL_ALPHA_TEST);
         GL11.glDisable(GL11.GL_CULL_FACE);
+        // empurra o LOD um pouco para tras: onde ele coincide com chunks normais (emenda/atraso da mascara) vence o terreno real
+        GL11.glEnable(GL11.GL_POLYGON_OFFSET_FILL);
+        GL11.glPolygonOffset(1.0f, 2.0f);
         GL11.glEnable(GL11.GL_TEXTURE_2D);
         GL11.glEnable(GL11.GL_FOG);
         GL11.glFogi(GL11.GL_FOG_MODE, GL11.GL_LINEAR);
@@ -106,24 +112,30 @@ public final class DistantTerrainRenderer {
         GL11.glLightModel(GL11.GL_LIGHT_MODEL_AMBIENT, amb);
         GL11.glColor4f(1f, 1f, 1f, 1f);
 
-        int drawn = 0;
+        int drawn = 0, withData = 0, withMesh = 0, culledDist = 0, culledFrustum = 0, drawnBeyond = 0, dataBeyond = 0;
+        double vanillaBlocks = mc.gameSettings.renderDistanceChunks * 16.0;
         long tick = mgr.tick();
         long[] keys = mgr.wantedKeys();
         DistantRepresentationCache cache = mgr.cache();
         for (int i = 0; i < keys.length; i++) {
-            Object o = cache.get(keys[i]);
-            if (o == null) continue;
-            GLMesh mesh = (GLMesh) o;
+            Region reg = mgr.regionOrNull(keys[i]);
+            boolean hasData = reg != null && reg.hasData;
             int rx = Region.keyX(keys[i]), rz = Region.keyZ(keys[i]);
             double dx = rx * 256.0 + 128.0 - ex, dz = rz * 256.0 + 128.0 - ez;
             double d2 = Math.sqrt(dx * dx + dz * dz);
-            if (d2 > dist + 181) continue;
+            boolean beyond = d2 > vanillaBlocks;
+            if (hasData) { withData++; if (beyond) dataBeyond++; }
+            Object o = cache.get(keys[i]);
+            if (o == null) continue;
+            withMesh++;
+            GLMesh mesh = (GLMesh) o;
+            if (d2 > dist + 181) { culledDist++; continue; }
             double dy = 96.0 - ey;
             double len = Math.sqrt(d2 * d2 + dy * dy);
             if (len > 220) {
                 double dot = (dx * lx + dy * ly + dz * lz) / len;
                 double ang = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
-                if (ang > diagHalf + Math.atan2(200.0, len) + 0.25) continue;
+                if (ang > diagHalf + Math.atan2(200.0, len) + 0.25) { culledFrustum++; continue; }
             }
             mesh.lastUse = tick;
             GL11.glPushMatrix();
@@ -131,7 +143,12 @@ public final class DistantTerrainRenderer {
             GL11.glCallList(mesh.list);
             GL11.glPopMatrix();
             drawn++;
+            if (beyond) drawnBeyond++;
         }
+        LODProfiler pf = mgr.profiler;
+        pf.regionsWanted = keys.length; pf.regionsWithData = withData; pf.regionsWithMesh = withMesh;
+        pf.culledDistance = culledDist; pf.culledFrustum = culledFrustum;
+        pf.drawnBeyondVanilla = drawnBeyond; pf.dataBeyondVanilla = dataBeyond;
 
         GL11.glMatrixMode(GL11.GL_MODELVIEW);
         GL11.glPopMatrix();

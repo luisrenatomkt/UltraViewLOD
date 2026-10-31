@@ -1,5 +1,6 @@
 package com.ultraview.lod.core;
 
+import com.ultraview.lod.UltraViewLOD;
 import com.ultraview.lod.config.LODConfig;
 import com.ultraview.lod.data.ChunkDataProvider;
 import com.ultraview.lod.data.DiskCacheManager;
@@ -47,7 +48,9 @@ public final class LODManager implements HeightSource {
     private final ConcurrentHashMap<Long, Region> regions = new ConcurrentHashMap<Long, Region>();
     private final ConcurrentLinkedQueue<LoadResult> loadResults = new ConcurrentLinkedQueue<LoadResult>();
     private final ConcurrentLinkedQueue<BuildResult> buildResults = new ConcurrentLinkedQueue<BuildResult>();
-    private final Set<Long> diskChecked = new HashSet<Long>();
+    /** key -> tick do ultimo pedido de leitura (disco/save); attempts = quantos pedidos foram feitos. */
+    private final Map<Long, Long> checkedAt = new HashMap<Long, Long>();
+    private final Map<Long, Integer> attempts = new HashMap<Long, Integer>();
     private final Set<Long> lastMasked = new HashSet<Long>();
     private final ArrayDeque<Long> urgent = new ArrayDeque<Long>();
     private volatile Set<Long> wanted = Collections.emptySet();
@@ -84,6 +87,7 @@ public final class LODManager implements HeightSource {
     public DistantRepresentationCache cache() { return cache; }
     public long[] wantedKeys() { return wantedKeys; }
     public String worldId() { return worldId; }
+    public Region regionOrNull(long key) { return regions.get(key); }
 
     public Region getOrCreateRegion(int rx, int rz) {
         long k = Region.key(rx, rz);
@@ -124,6 +128,10 @@ public final class LODManager implements HeightSource {
         long t0 = System.nanoTime();
         if (w != lastWorld || w.provider.getDimensionId() != lastDim) switchWorld(w);
         if (w.provider.getHasNoSky()) { active = false; status = "dimensao sem ceu (nao suportada)"; return; }
+        if (!active && UltraViewLOD.LOGGER != null) {
+            UltraViewLOD.LOGGER.info("[UltraViewLOD] LOD ativo: distancia=" + LODConfig.visualDistance + " blocos, chunks do Minecraft="
+                + mc.gameSettings.renderDistanceChunks + ", cache=" + LODConfig.cacheEnabled + ", leitura do save=" + LODConfig.prefetchFromSave);
+        }
         active = true;
         status = "ativo";
 
@@ -134,9 +142,13 @@ public final class LODManager implements HeightSource {
         }
         scanChunks(w, pcx, pcz);
         processLoadResults();
-        if (tickCounter % 10 == 0) { rebuildWantedList(); updateMasks(w, pcx, pcz); }
+        if (tickCounter % 10 == 0) rebuildWantedList();
+        if (tickCounter % 5 == 0) updateMasks(w, pcx, pcz); // mascara atualizada mais cedo => menos sobreposicao ao andar rapido
         driveRegions();
         if (tickCounter - lastCleanTick >= 40) { lastCleanTick = tickCounter; enforceMemory(pcx, pcz); }
+        if (LODConfig.debugOverlay && tickCounter % 600 == 0 && UltraViewLOD.LOGGER != null) {
+            for (String line : debugLines()) UltraViewLOD.LOGGER.info(line);
+        }
         if (tickCounter - lastSaveTick >= 1200) { lastSaveTick = tickCounter; saveDirtyAsync(); }
         profiler.recordTick(System.nanoTime() - t0);
     }
@@ -148,7 +160,8 @@ public final class LODManager implements HeightSource {
         cache.clear();
         loadResults.clear();
         buildResults.clear();
-        diskChecked.clear();
+        checkedAt.clear();
+        attempts.clear();
         lastMasked.clear();
         urgent.clear();
         wanted = Collections.emptySet();
@@ -300,7 +313,7 @@ public final class LODManager implements HeightSource {
             long key = keys[i];
             if (!wantedInView[i] && !LODConfig.prefetch) continue;
             int prio = i;
-            if (!diskChecked.contains(key) && loadBudget > 0) {
+            if (loadBudget > 0 && needsLoad(key)) {
                 if (requestLoad(key, prio)) loadBudget--;
             }
             Region r = regions.get(key);
@@ -308,16 +321,33 @@ public final class LODManager implements HeightSource {
             r.levelBase = transition.chooseBase(r.levelBase, wantedDist[i], scale, hyst);
             int level = Math.min(3, r.levelBase + levelBias);
             boolean stale = r.builtLevel != level || r.builtDataVersion != r.dataVersion || r.builtMaskVersion != r.maskVersion;
-            if (!stale) continue;
+            if (!stale) {
+                if (!r.reuseCounted) { r.reuseCounted = true; profiler.stableReuse.incrementAndGet(); }
+                continue;
+            }
             if (r.builtLevel == level && tickCounter - r.lastBuildTick < 20) continue; // limita reconstrucoes da mesma regiao
             if (submitBuild(r, level, prio)) meshBudget--;
         }
     }
 
+    /**
+     * Pedido unico por regiao... exceto quando o resultado foi vazio: no singleplayer o .mca pode ainda nao existir
+     * (o servidor grava chunks no autosave). Regioes sem nenhum dado sao relidas a cada ~60 s (max. 5 vezes).
+     */
+    private boolean needsLoad(long key) {
+        Long at = checkedAt.get(key);
+        if (at == null) return true;
+        if (tickCounter - at < 1200 || !LODConfig.prefetchFromSave || !mc.isSingleplayer()) return false;
+        Integer a = attempts.get(key);
+        if (a != null && a >= 5) return false;
+        Region r = regions.get(key);
+        return r == null || !r.hasData;
+    }
+
     private boolean requestLoad(final long key, int prio) {
         final boolean useDisk = LODConfig.cacheEnabled;
         final File dimDir = LODConfig.prefetchFromSave ? saveDimDir() : null;
-        if (!useDisk && dimDir == null) { diskChecked.add(key); return false; }
+        if (!useDisk && dimDir == null) { checkedAt.put(key, tickCounter); attempts.put(key, 99); return false; }
         final int gen = generation, d = dim;
         final String id = worldId;
         final long maxAge = LODConfig.cacheMaxAgeHours * 3600000L;
@@ -327,13 +357,23 @@ public final class LODManager implements HeightSource {
             public void run() {
                 if (gen != generation) return;
                 Region r = null;
-                boolean fromDisk = false;
+                boolean fromDisk = false, merged = false;
                 if (useDisk) { r = disk.load(id, d, rx, rz, maxAge); fromDisk = r != null; }
-                if (r == null && dimDir != null) r = SaveReader.read(dimDir, rx, rz, veg);
-                loadResults.add(new LoadResult(gen, key, r, fromDisk));
+                // O cache em disco so contem o que o cliente ja viu; completa o que falta com o save (somente leitura).
+                // (Antes o save era ignorado sempre que existia um cache parcial => regioes ficavam incompletas.)
+                if (dimDir != null && (r == null || !r.isComplete())) {
+                    Region fromSave = SaveReader.read(dimDir, rx, rz, veg);
+                    if (r == null) r = fromSave;
+                    else if (fromSave != null && r.mergeUnknownFrom(fromSave)) merged = true;
+                }
+                loadResults.add(new LoadResult(gen, key, r, fromDisk && !merged));
             }
         });
-        if (ok) diskChecked.add(key);
+        if (ok) {
+            checkedAt.put(key, tickCounter);
+            Integer a = attempts.get(key);
+            attempts.put(key, a == null ? 1 : a + 1);
+        }
         return ok;
     }
 
@@ -353,17 +393,18 @@ public final class LODManager implements HeightSource {
         }
     }
 
-    private short[][] neighborEdges(Region r) {
-        short[][] e = new short[4][];
+    /** Alturas de MALHA (chao medio) das amostras de borda dos vizinhos: [0]=oeste, [1]=leste, [2]=norte, [3]=sul. */
+    private int[][] neighborEdges(Region r) {
+        int[][] e = new int[4][];
         Region w = regions.get(Region.key(r.rx - 1, r.rz));
         Region ea = regions.get(Region.key(r.rx + 1, r.rz));
         Region no = regions.get(Region.key(r.rx, r.rz - 1));
         Region so = regions.get(Region.key(r.rx, r.rz + 1));
         int S = Region.SIZE;
-        if (w != null) { e[0] = new short[S]; for (int i = 0; i < S; i++) e[0][i] = w.heights[i * S + S - 1]; }
-        if (ea != null) { e[1] = new short[S]; for (int i = 0; i < S; i++) e[1][i] = ea.heights[i * S]; }
-        if (no != null) { e[2] = new short[S]; for (int i = 0; i < S; i++) e[2][i] = no.heights[(S - 1) * S + i]; }
-        if (so != null) { e[3] = new short[S]; for (int i = 0; i < S; i++) e[3][i] = so.heights[i]; }
+        if (w != null) { e[0] = new int[S]; for (int i = 0; i < S; i++) e[0][i] = w.meshHeightAt(i * S + S - 1); }
+        if (ea != null) { e[1] = new int[S]; for (int i = 0; i < S; i++) e[1][i] = ea.meshHeightAt(i * S); }
+        if (no != null) { e[2] = new int[S]; for (int i = 0; i < S; i++) e[2][i] = no.meshHeightAt((S - 1) * S + i); }
+        if (so != null) { e[3] = new int[S]; for (int i = 0; i < S; i++) e[3][i] = so.meshHeightAt(i); }
         return e;
     }
 
@@ -371,21 +412,24 @@ public final class LODManager implements HeightSource {
         final int gen = generation, dv = r.dataVersion, mv = r.maskVersion;
         final long key = r.key();
         final short[] h = r.heights.clone();
+        final byte[] fl = r.flags.clone();
         final int[] c = r.colors.clone();
         final long[] mask = r.maskCopy();
-        final short[][] edges = neighborEdges(r);
+        final int[][] edges = neighborEdges(r);
         final int tex = LODTransitionManager.textureSizeFor(level, LODConfig.textureResolution, LODConfig.memorySaver);
         r.building = true;
+        r.reuseCounted = false;
         boolean ok = tasks.submit(prio, new Runnable() {
             public void run() {
                 if (gen != generation || !wanted.contains(key)) { buildResults.add(new BuildResult(gen, key, null, level, dv, mv)); return; }
                 MeshData m = null;
                 try {
                     long t0 = System.nanoTime();
-                    m = TerrainMeshBuilder.build(h, c, level, mask, edges, tex);
+                    m = TerrainMeshBuilder.build(h, fl, c, level, mask, edges, tex);
                     profiler.recordMesh(System.nanoTime() - t0);
                 } catch (Throwable t) {
-                    System.err.println("[UltraViewLOD] falha ao gerar malha: " + t);
+                    long n = profiler.meshErrors.incrementAndGet();
+                    if (n <= 5) System.err.println("[UltraViewLOD] falha ao gerar malha (#" + n + "): " + t);
                 }
                 buildResults.add(new BuildResult(gen, key, m, level, dv, mv));
             }
@@ -445,7 +489,8 @@ public final class LODManager implements HeightSource {
             if (r.dirtyDisk && LODConfig.cacheEnabled) { r.dirtyDisk = false; saveAsync(r); }
             regions.remove(r.key());
             cache.remove(r.key());
-            diskChecked.remove(r.key());
+            checkedAt.remove(r.key());
+            attempts.remove(r.key());
         }
     }
 
@@ -482,7 +527,8 @@ public final class LODManager implements HeightSource {
         for (Region r : regions.values()) { r.dirtyDisk = false; }
         regions.clear();
         cache.clear();
-        diskChecked.clear();
+        checkedAt.clear();
+        attempts.clear();
         generation++;
         return n;
     }
@@ -490,17 +536,34 @@ public final class LODManager implements HeightSource {
     public void onConfigChanged() { /* valores sao lidos a cada uso; nada a reconstruir */ }
 
     // ---------------------------------------------------------------- diagnostico
+    /** Explica, com os contadores reais do ultimo quadro, por que o LOD aparece (ou nao) alem da distancia do Minecraft. */
+    private String diagnose() {
+        LODProfiler p = profiler;
+        if (!active) return status;
+        if (p.regionsWanted == 0) return "nenhuma regiao desejada ainda (aguarde alguns segundos)";
+        if (p.regionsWithData == 0) return "NENHUMA regiao tem dados: o LOD so desenha o que o cliente ja recebeu ou o save ja contem (singleplayer: explore/pre-gere o mundo; servidor: so chunks ja recebidos)";
+        if (p.dataBeyondVanilla == 0) return "so ha dados dentro da distancia do Minecraft; alem dela o mundo nunca foi visto/gerado => nada a desenhar (o mod nao inventa terreno)";
+        if (p.regionsWithMesh == 0) return "ha dados, mas nenhuma malha ficou pronta (pendentes: " + tasks.pending() + ", erros: " + p.meshErrors.get() + ")";
+        if (p.drawnBeyondVanilla == 0) return "malhas prontas, mas nada desenhado alem do Minecraft: descartadas " + p.culledFrustum + " pelo frustum e " + p.culledDistance + " por distancia (olhe para a area explorada)";
+        return "OK: " + p.drawnBeyondVanilla + " regioes desenhadas alem da distancia do Minecraft";
+    }
+
     public List<String> debugLines() {
         List<String> l = new ArrayList<String>();
-        l.add("[UltraView LOD] " + status + " | alvo " + LODConfig.visualDistance + " blocos | bias de qualidade " + levelBias);
-        l.add(String.format(Locale.ROOT, "  regioes: %d em memoria, %d com malha, %d desenhadas | tarefas pendentes: %d | carregando: %d",
-            regions.size(), cache.size(), profiler.regionsDrawn, tasks.pending(), diskChecked.size() - 0));
+        LODProfiler p = profiler;
+        l.add("[UltraView LOD] " + status + " | LOD " + LODConfig.visualDistance + " blocos | Minecraft " + (mc.gameSettings.renderDistanceChunks * 16)
+            + " blocos | bias de qualidade " + levelBias);
+        l.add(String.format(Locale.ROOT, "  regioes: %d desejadas, %d com dados (%d alem do Minecraft), %d com malha | desenhadas: %d (%d alem do Minecraft)",
+            p.regionsWanted, p.regionsWithData, p.dataBeyondVanilla, p.regionsWithMesh, p.regionsDrawn, p.drawnBeyondVanilla));
+        l.add(String.format(Locale.ROOT, "  descartadas: %d por distancia, %d pelo frustum | tarefas pendentes: %d | em memoria: %d | malhas estaveis reaproveitadas: %d | erros de geracao: %d",
+            p.culledDistance, p.culledFrustum, tasks.pending(), regions.size(), p.stableReuse.get(), p.meshErrors.get()));
         l.add(String.format(Locale.ROOT, "  cache disco reutilizado: %d | lidas do save: %d | malhas geradas: %d (media %.2f ms)",
-            profiler.diskHits.get(), profiler.saveReads.get(), profiler.meshBuilds.get(), profiler.meshMsAvg()));
+            p.diskHits.get(), p.saveReads.get(), p.meshBuilds.get(), p.meshMsAvg()));
         l.add(String.format(Locale.ROOT, "  memoria estimada: dados %.1f MB + malhas %.1f MB / limite %d MB",
             regionBytes() / 1048576.0, cache.bytes() / 1048576.0, LODConfig.cacheMemoryMB));
         l.add(String.format(Locale.ROOT, "  tick %.3f ms | render %.3f ms | chunks amostrados: %d | alteracoes detectadas: %d | oclusao: ATIVA (sempre)",
-            profiler.tickMsAvg, profiler.renderMsAvg, profiler.chunksScanned.get(), profiler.chunkChanges.get()));
+            p.tickMsAvg, p.renderMsAvg, p.chunksScanned.get(), p.chunkChanges.get()));
+        l.add("  diagnostico: " + diagnose());
         return l;
     }
 }

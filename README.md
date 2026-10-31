@@ -6,13 +6,13 @@ em cache (memória e disco), sem aumentar a distância convencional de chunks.
 ## Como funciona
 1. **Perto**: chunks normais do Minecraft, intactos (blocos, luz, água, mobs, outros mods).
 2. **Dados**: o mod resume cada chunk que o cliente recebe em amostras 4x4 (altura do topo, cor com tint de bioma, água). No singleplayer ele também lê (somente leitura, em segundo plano) os arquivos `.mca` já gerados.
-3. **Níveis**: regiões de 256x256 blocos viram heightfield com células de 4, 8, 16 ou 32 blocos conforme a distância (histerese contra piscar) + uma textura 64/32/16 px por região. Altura por célula = máximo (preserva silhuetas e é conservador para oclusão).
+3. **Níveis**: regiões de 256x256 blocos viram heightfield com células de 4, 8, 16 ou 32 blocos conforme a distância (histerese contra piscar) + uma textura 64/32/16 px por região. Altura por célula = **média do chão** das amostras (copas de árvore não viram relevo; a cor da copa continua no topo). A oclusão de jogadores continua usando o topo máximo (conservador).
 4. **Transição**: chunks que o Minecraft já desenha são "mascarados" (sem geometria duplicada); a neblina do Minecraft é substituída pela do LOD para não haver faixa de neblina na emenda.
 5. **Cache**: LRU em memória (limite configurável; sob pressão o mod simplifica mais), disco por mundo/dimensão com CRC32, versão e validade (padrão 72h).
 6. **Jogadores**: continuam entidades reais do Minecraft (modelo, skin, animação). Além de 64 blocos só são desenhados com linha de visão (raycast no mundo + geometria do LOD). Nomes só aparecem com linha de visão. Sem configuração para desligar isso. Área desconhecida = oculto.
 
 ## Instalar
-Forge 1.8.9 (11.15.1.2318) + Java 8. Coloque `UltraViewLOD-1.8.9-1.0.0.jar` em `.minecraft/mods`.
+Forge 1.8.9 (11.15.1.2318) + Java 8. Coloque `UltraViewLOD-1.8.9-1.0.1.jar` em `.minecraft/mods`.
 
 ## Compilar
 Veja o tutorial do GitHub (workflow já incluído em `.github/workflows/build.yml`). Local: Java 8 + Gradle 2.14.1 → `gradle setupDecompWorkspace build` → `build/libs/`.
@@ -35,3 +35,13 @@ Veja o tutorial do GitHub (workflow já incluído em `.github/workflows/build.ym
 
 ## Roteiro de testes no jogo
 1 carregar; 2 perto normal; 3 horizonte além dos chunks; 4 construção distante; 5 quebrar blocos e ver atualizar; 6 sair/entrar e ver `cache disco reutilizado` subir; 7 comparar FPS ligado/desligado (`/uvlod toggle`); 8 `memória estimada` ≤ limite; 9 servidor autorizado: jogadores animados; 10 parede/montanha entre você e outro jogador: corpo (>64 blocos) e nick somem; 11 mover rápido; 12 áreas desconhecidas ficam vazias.
+
+
+## Versão 1.0.1 — correções (terreno distante e distância estendida)
+- Terreno: o relevo usava o **máximo** de 4 colunas e a **altura das copas** => colinas viravam mesas verdes enormes, com paredes pintadas de verde. Agora usa a média do chão; copas só colorem o topo.
+- Frestas entre regiões de níveis diferentes: paredes de borda com saia de 2 blocos.
+- Emenda com chunks normais: máscara atualizada a cada 5 ticks e LOD desenhado com polygon offset (o terreno real vence onde coincidem).
+- Dados: o save (.mca) era ignorado quando havia cache em disco parcial; e uma região sem dados no save nunca era relida. Agora o cache parcial é completado pelo save e regiões vazias são relidas (até 5x, a cada ~60 s).
+- Cache em disco v1 (alturas de copa) é descartado automaticamente (formato v2).
+- Diagnóstico (`/uvlod status` ou `/uvlod debug`): regiões desejadas/com dados/com malha/desenhadas, descartes por frustum e distância, e uma linha de **diagnóstico** que diz por que nada aparece além da distância do Minecraft.
+- Limitação inalterada: o LOD só desenha terreno que o cliente já recebeu ou que já existe no save. Terreno nunca gerado/visto não é inventado.

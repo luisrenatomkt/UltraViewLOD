@@ -18,7 +18,7 @@ import org.apache.logging.log4j.Logger;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 
-@Mod(modid = UltraViewLOD.MODID, name = "UltraView LOD", version = "1.0.0", clientSideOnly = true,
+@Mod(modid = UltraViewLOD.MODID, name = "UltraView LOD", version = "1.0.1", clientSideOnly = true,
      acceptedMinecraftVersions = "[1.8.9]", guiFactory = "com.ultraview.lod.config.UVGuiFactory")
 public class UltraViewLOD {
     public static final String MODID = "ultraviewlod";

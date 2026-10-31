@@ -10,6 +10,19 @@ public final class Region {
     public static final int BLOCKS = CHUNKS * 16;
     public static final short UNKNOWN = Short.MIN_VALUE;
     public static final int BYTES = SIZE * SIZE * 7;
+    /** flags: bit0 = agua; bits2..7 = queda (topo maximo - altura media do chao) usada pela malha. */
+    public static final int DROP_SHIFT = 2, DROP_MAX = 63;
+
+    /** Altura usada para desenhar o terreno (chao medio da celula); UNKNOWN (como int) se desconhecida. */
+    public static int meshHeight(short h, byte f) {
+        if (h == UNKNOWN) return UNKNOWN;
+        return h - ((f >> DROP_SHIFT) & DROP_MAX);
+    }
+    public int meshHeightAt(int idx) { return meshHeight(heights[idx], flags[idx]); }
+    public boolean isComplete() {
+        for (short h : heights) if (h == UNKNOWN) return false;
+        return true;
+    }
 
     public final int rx, rz;
     public final short[] heights = new short[SIZE * SIZE];
@@ -23,7 +36,7 @@ public final class Region {
     public int maskVersion;
     // controle de malha (somente thread principal)
     public int levelBase = -1, builtLevel = -1, builtDataVersion = -1, builtMaskVersion = -1;
-    public boolean building;
+    public boolean building, reuseCounted;
     public long lastBuildTick = -1000;
 
     public Region(int rx, int rz) {

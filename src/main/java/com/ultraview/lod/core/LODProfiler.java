@@ -14,6 +14,10 @@ public final class LODProfiler {
     public volatile double tickMsAvg;
     public volatile double renderMsAvg;
     public volatile int regionsDrawn;
+    public final AtomicLong meshErrors = new AtomicLong();
+    public final AtomicLong stableReuse = new AtomicLong();
+    // contadores do ultimo quadro (atualizados pelo renderizador)
+    public volatile int regionsWanted, regionsWithData, regionsWithMesh, culledDistance, culledFrustum, drawnBeyondVanilla, dataBeyondVanilla;
 
     public void recordTick(long nanos) { tickMsAvg = tickMsAvg * 0.95 + (nanos / 1e6) * 0.05; }
     public void recordRender(long nanos) { renderMsAvg = renderMsAvg * 0.95 + (nanos / 1e6) * 0.05; }
@@ -21,6 +25,7 @@ public final class LODProfiler {
     public double meshMsAvg() { long n = meshBuilds.get(); return n == 0 ? 0 : meshNanos.get() / 1e6 / n; }
     public void reset() {
         diskHits.set(0); saveReads.set(0); meshBuilds.set(0); meshNanos.set(0); uploads.set(0);
-        chunksScanned.set(0); chunkChanges.set(0);
+        chunksScanned.set(0); chunkChanges.set(0); meshErrors.set(0); stableReuse.set(0);
+        regionsWanted = regionsWithData = regionsWithMesh = culledDistance = culledFrustum = drawnBeyondVanilla = dataBeyondVanilla = 0;
     }
 }

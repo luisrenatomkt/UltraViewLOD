@@ -30,7 +30,7 @@ public final class ChunkDataProvider {
 
     public static boolean isVegetation(Block b) { return b instanceof BlockLeaves || b instanceof BlockLog; }
 
-    /** out[0]=altura da superficie (y+1), out[1]=ARGB, out[2]=flag agua. */
+    /** out[0]=altura da superficie (y+1, inclui copas), out[1]=ARGB, out[2]=flag agua, out[3]=altura do CHAO sob a vegetacao (y+1). */
     public static boolean sampleColumn(BlockReader rd, int h, boolean vegetation, int[] out) {
         if (h <= 0) return false;
         int y = Math.min(h, 255);
@@ -72,34 +72,57 @@ public final class ChunkDataProvider {
             int r = (int) (((rgb >> 16) & 255) * f), g = (int) (((rgb >> 8) & 255) * f), bl = (int) ((rgb & 255) * f);
             rgb = (r << 16) | (g << 8) | bl;
         }
+        // Chao real: se o topo e copa/tronco, desce ate o primeiro bloco que nao e ar nem vegetacao.
+        // O relevo do LOD usa o chao (copas viravam "montanhas verdes" gigantes); a cor continua sendo a da copa.
+        int gy = sy;
+        if (isVegetation(b)) {
+            int g = sy - 1;
+            while (g > 0) {
+                Block gb = rd.get(g).getBlock();
+                if (gb.getMaterial() != Material.air && !isVegetation(gb)) break;
+                g--;
+            }
+            if (g > 0) gy = g;
+        }
         out[0] = sy + 1;
         out[1] = 0xFF000000 | rgb;
         out[2] = water ? 1 : 0;
+        out[3] = gy + 1;
         return true;
     }
 
-    /** Amostra um chunk inteiro (16 celulas 4x4). Retorna false se nao houver dados validos. */
+    /**
+     * Amostra um chunk inteiro (16 celulas 4x4). Retorna false se nao houver dados validos.
+     * h[] = topo MAXIMO das 4 colunas amostradas (conservador, usado pela oclusao de jogadores);
+     * fl[] = bit0 agua | bits2..7 = "queda" (topo maximo - altura MEDIA do chao), usada pela malha do terreno.
+     */
     public static boolean sampleChunk(int[] heightMap /* 256, z<<4|x */, BlockReaderFactory f, boolean vegetation,
                                       short[] h, int[] c, byte[] fl) {
-        int[] col = new int[3];
+        int[] col = new int[4];
         boolean any = false;
         for (int j = 0; j < 4; j++) {
             for (int i = 0; i < 4; i++) {
                 int bestTop = Integer.MIN_VALUE, bestCol = 0, bestFlag = 0;
+                int groundSum = 0, groundN = 0;
                 for (int oz : OFFS) {
                     for (int ox : OFFS) {
                         int lx = i * 4 + ox, lz = j * 4 + oz;
                         BlockReader rd = f.reader(lx, lz);
-                        if (sampleColumn(rd, heightMap[lz << 4 | lx], vegetation, col) && col[0] > bestTop) {
-                            bestTop = col[0]; bestCol = col[1]; bestFlag = col[2];
-                        }
+                        if (!sampleColumn(rd, heightMap[lz << 4 | lx], vegetation, col)) continue;
+                        groundSum += col[3];
+                        groundN++;
+                        if (col[0] > bestTop) { bestTop = col[0]; bestCol = col[1]; bestFlag = col[2]; }
                     }
                 }
                 int s = j * 4 + i;
                 if (bestTop == Integer.MIN_VALUE) {
                     h[s] = Region.UNKNOWN; c[s] = 0; fl[s] = 0;
                 } else {
-                    h[s] = (short) bestTop; c[s] = bestCol; fl[s] = (byte) bestFlag; any = true;
+                    int meanGround = Math.round(groundSum / (float) groundN);
+                    int drop = Math.max(0, Math.min(Region.DROP_MAX, bestTop - meanGround));
+                    h[s] = (short) bestTop; c[s] = bestCol;
+                    fl[s] = (byte) ((bestFlag & 1) | (drop << Region.DROP_SHIFT));
+                    any = true;
                 }
             }
         }
